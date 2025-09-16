@@ -633,7 +633,7 @@ class RTDETRTransformer(nn.Module):
             q = target.shape[1]
             # sub_seq_len = [100 + (i+1)*5 for i in range(bs)]
             sub_seq_len = torch.tensor([q] * bs, device=target.device, dtype=torch.long)
-            sub_seq_len = get_k_tensor_constrained(enc_topk_logits.max(-1)[0], offset=self.offset, lag=self.lag, sub_seq=sub_seq_len)
+            sub_seq_len = get_k_tensor_constrained(enc_topk_logits.max(-1)[0], offset=100, lag=50, sub_seq=sub_seq_len)
             #sub_seq_len = [e.item() for e in sub_seq_len]
         else:
             sub_seq_len = None
