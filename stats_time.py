@@ -49,8 +49,8 @@ def engine_export_all(suffix="a"):
         engine_export(suffix,sz)
 
 if __name__ == "__main__":
-    # get_eval_log_v1_all(suffix="o",n=5)
-    for s in ["o", "a"]:
-        engine_export_all(suffix=s)
-    for s in ["o", "a"]:
-        run_engine_all(suffix=s,n=5)
+    get_eval_log_v1_all(suffix="o",n=5)
+    # for s in ["o", "a"]:
+    #     engine_export_all(suffix=s)
+    # for s in ["o", "a"]:
+    #     run_engine_all(suffix=s,n=5)
