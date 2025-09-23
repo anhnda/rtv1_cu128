@@ -117,8 +117,7 @@ def evaluate(model: torch.nn.Module, criterion: torch.nn.Module, postprocessors,
     accu_time = 0
     for samples, targets in metric_logger.log_every(data_loader, 10, header):
         ic += 1
-        if ic == mx:
-            break
+
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
@@ -163,7 +162,8 @@ def evaluate(model: torch.nn.Module, criterion: torch.nn.Module, postprocessors,
         #         res_pano[i]["image_id"] = image_id
         #         res_pano[i]["file_name"] = file_name
         #     panoptic_evaluator.update(res_pano)
-
+        if ic == mx:
+            break
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)

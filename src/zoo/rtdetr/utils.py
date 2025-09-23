@@ -9,6 +9,103 @@ import numpy as np
 import torch
 
 def get_k_tensor_constrained(ar, sub_seq, offset=20, lag=10, alpha=1, beta=0.4, gamma=0.4):
+    """
+    Zero-warning ONNX version. Requires sub_seq to be a tensor for tracing.
+    Call this version during ONNX export to eliminate all warnings.
+    
+    Important: Ensure sub_seq is already a tensor before calling this function!
+    """
+    batch_size, N = ar.shape
+    device = ar.device
+    # return torch.tensor([100] * batch_size, device = device)
+
+    # Assume sub_seq is already a tensor (no conversion during tracing)
+    # sub_seq = sub_seq.to(device)
+
+    # Calculate per-sequence k ranges
+    k_end_global = N - offset - lag
+    k_end_per_seq = sub_seq - lag
+    k_end_per_seq = torch.clamp(k_end_per_seq, max=k_end_global)
+
+    # Use fixed maximum range to avoid dynamic operations
+    max_possible_k = N - offset - lag
+    if offset >= max_possible_k:
+        return sub_seq.clone()  # no valid k, return per-seq cap
+    k_range = torch.arange(offset, max_possible_k, device=device, dtype=torch.long)
+    
+    # Create masks without control flow
+    k_range_expanded = k_range.unsqueeze(0)
+    k_end_expanded = k_end_per_seq.unsqueeze(1)
+    valid_k_mask = k_range_expanded < k_end_expanded
+
+    num_k = k_range.shape[0]
+    ar_expanded = ar.unsqueeze(1)
+    k_expanded = k_range.unsqueeze(0).unsqueeze(2)
+
+    # Create segment masks
+    indices = torch.arange(N, device=device, dtype=torch.long).unsqueeze(0).unsqueeze(0)
+    mask_A1 = indices < k_expanded
+    mask_A2 = indices >= (k_expanded + lag)
+
+    # Broadcast
+    mask_A1 = mask_A1.expand(batch_size, num_k, N)
+    mask_A2 = mask_A2.expand(batch_size, num_k, N)
+    ar_broadcast = ar_expanded.expand(batch_size, num_k, N)
+
+    # Calculations using only tensor operations
+    A1_lengths = mask_A1.sum(dim=2, keepdim=True)
+    x_coords = torch.arange(N, device=device, dtype=torch.float32).expand(batch_size, num_k, N)
+
+    zeros_float = torch.zeros_like(ar_broadcast)
+    A1_vals = torch.where(mask_A1, ar_broadcast, zeros_float)
+    A1_x = torch.where(mask_A1, x_coords, zeros_float)
+
+    k_start_vals = k_range.unsqueeze(0).expand(batch_size, num_k).float()
+    A1_x_adjusted = A1_x - k_start_vals.unsqueeze(2) * mask_A1.float()
+    A1_x_adjusted = torch.where(mask_A1, A1_x_adjusted, zeros_float)
+
+    # Linear regression calculations
+    n = A1_lengths.squeeze(2).float()
+    sum_x = A1_x_adjusted.sum(dim=2)
+    sum_y = A1_vals.sum(dim=2)
+    sum_xy = (A1_x_adjusted * A1_vals).sum(dim=2)
+    sum_x2 = (A1_x_adjusted ** 2).sum(dim=2)
+
+    numerator = n * sum_xy - sum_x * sum_y
+    denominator = n * sum_x2 - sum_x ** 2
+
+    # Use torch.full_like to avoid torch.tensor() warnings
+    eps = torch.full_like(denominator, 1e-10)
+    denominator = torch.where(denominator.abs() < eps, eps, denominator)
+    slope_A1 = numerator / denominator
+
+    # Variance calculations
+    A1_counts = mask_A1.sum(dim=2).float()
+    A2_counts = mask_A2.sum(dim=2).float()
+
+    A1_mean = A1_vals.sum(dim=2) / torch.clamp(A1_counts, min=1)
+    A1_vals_centered = A1_vals - A1_mean.unsqueeze(2) * mask_A1.float()
+    A1_var = (A1_vals_centered ** 2 * mask_A1.float()).sum(dim=2) / torch.clamp(A1_counts, min=1)
+
+    A2_vals = torch.where(mask_A2, ar_broadcast, zeros_float)
+    A2_mean = A2_vals.sum(dim=2) / torch.clamp(A2_counts, min=1)
+    A2_vals_centered = A2_vals - A2_mean.unsqueeze(2) * mask_A2.float()
+    A2_var = (A2_vals_centered ** 2 * mask_A2.float()).sum(dim=2) / torch.clamp(A2_counts, min=1)
+
+    # Final scoring and selection
+    scores = alpha * slope_A1.abs() + beta * A1_var - gamma * A2_var
+    neg_inf = torch.full_like(scores, -1e10)
+    scores = torch.where(valid_k_mask, scores, neg_inf)
+
+    best_indices = scores.argmax(dim=1)
+    best_k = k_range[best_indices]
+
+    result = best_k + lag
+    result = torch.clamp(result, max=sub_seq)
+
+    return result
+
+def get_k_tensor_constrainedx(ar, sub_seq, offset=20, lag=10, alpha=1, beta=0.4, gamma=0.4):
     batch_size, N = ar.shape
     device = ar.device
 
@@ -87,100 +184,7 @@ def get_k_tensor_constrained(ar, sub_seq, offset=20, lag=10, alpha=1, beta=0.4, 
     result = best_k + lag
     result = torch.clamp(result, max=sub_seq)  # ensure we don’t exceed per-seq boundary
     return result
-def get_k_tensor_constrained2(ar, sub_seq, offset=20, lag=10, alpha=1, beta=0.4, gamma=0.4):
-    """
-    Zero-warning ONNX version. Requires sub_seq to be a tensor for tracing.
-    Call this version during ONNX export to eliminate all warnings.
-    
-    Important: Ensure sub_seq is already a tensor before calling this function!
-    """
-    batch_size, N = ar.shape
-    device = ar.device
-    # return torch.tensor([100] * batch_size, device = device)
 
-    # Assume sub_seq is already a tensor (no conversion during tracing)
-    # sub_seq = sub_seq.to(device)
-
-    # Calculate per-sequence k ranges
-    k_end_global = N - offset - lag
-    k_end_per_seq = sub_seq - lag
-    k_end_per_seq = torch.clamp(k_end_per_seq, max=k_end_global)
-
-    # Use fixed maximum range to avoid dynamic operations
-    max_possible_k = N - offset - lag
-    k_range = torch.arange(offset, max_possible_k, device=device, dtype=torch.long)
-    
-    # Create masks without control flow
-    k_range_expanded = k_range.unsqueeze(0)
-    k_end_expanded = k_end_per_seq.unsqueeze(1)
-    valid_k_mask = k_range_expanded < k_end_expanded
-
-    num_k = k_range.shape[0]
-    ar_expanded = ar.unsqueeze(1)
-    k_expanded = k_range.unsqueeze(0).unsqueeze(2)
-
-    # Create segment masks
-    indices = torch.arange(N, device=device, dtype=torch.long).unsqueeze(0).unsqueeze(0)
-    mask_A1 = indices < k_expanded
-    mask_A2 = indices >= (k_expanded + lag)
-
-    # Broadcast
-    mask_A1 = mask_A1.expand(batch_size, num_k, N)
-    mask_A2 = mask_A2.expand(batch_size, num_k, N)
-    ar_broadcast = ar_expanded.expand(batch_size, num_k, N)
-
-    # Calculations using only tensor operations
-    A1_lengths = mask_A1.sum(dim=2, keepdim=True)
-    x_coords = torch.arange(N, device=device, dtype=torch.float32).expand(batch_size, num_k, N)
-
-    zeros_float = torch.zeros_like(ar_broadcast)
-    A1_vals = torch.where(mask_A1, ar_broadcast, zeros_float)
-    A1_x = torch.where(mask_A1, x_coords, zeros_float)
-
-    k_start_vals = k_range.unsqueeze(0).expand(batch_size, num_k).float()
-    A1_x_adjusted = A1_x - k_start_vals.unsqueeze(2) * mask_A1.float()
-    A1_x_adjusted = torch.where(mask_A1, A1_x_adjusted, zeros_float)
-
-    # Linear regression calculations
-    n = A1_lengths.squeeze(2).float()
-    sum_x = A1_x_adjusted.sum(dim=2)
-    sum_y = A1_vals.sum(dim=2)
-    sum_xy = (A1_x_adjusted * A1_vals).sum(dim=2)
-    sum_x2 = (A1_x_adjusted ** 2).sum(dim=2)
-
-    numerator = n * sum_xy - sum_x * sum_y
-    denominator = n * sum_x2 - sum_x ** 2
-
-    # Use torch.full_like to avoid torch.tensor() warnings
-    eps = torch.full_like(denominator, 1e-10)
-    denominator = torch.where(denominator.abs() < eps, eps, denominator)
-    slope_A1 = numerator / denominator
-
-    # Variance calculations
-    A1_counts = mask_A1.sum(dim=2).float()
-    A2_counts = mask_A2.sum(dim=2).float()
-
-    A1_mean = A1_vals.sum(dim=2) / torch.clamp(A1_counts, min=1)
-    A1_vals_centered = A1_vals - A1_mean.unsqueeze(2) * mask_A1.float()
-    A1_var = (A1_vals_centered ** 2 * mask_A1.float()).sum(dim=2) / torch.clamp(A1_counts, min=1)
-
-    A2_vals = torch.where(mask_A2, ar_broadcast, zeros_float)
-    A2_mean = A2_vals.sum(dim=2) / torch.clamp(A2_counts, min=1)
-    A2_vals_centered = A2_vals - A2_mean.unsqueeze(2) * mask_A2.float()
-    A2_var = (A2_vals_centered ** 2 * mask_A2.float()).sum(dim=2) / torch.clamp(A2_counts, min=1)
-
-    # Final scoring and selection
-    scores = alpha * slope_A1.abs() + beta * A1_var - gamma * A2_var
-    neg_inf = torch.full_like(scores, -1e10)
-    scores = torch.where(valid_k_mask, scores, neg_inf)
-
-    best_indices = scores.argmax(dim=1)
-    best_k = k_range[best_indices]
-
-    result = best_k + lag
-    result = torch.clamp(result, max=sub_seq)
-
-    return result
 def hash_v2(v):
     if v < 50:
         v = 50
